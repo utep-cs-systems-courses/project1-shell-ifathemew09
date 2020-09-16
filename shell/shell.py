@@ -1,176 +1,86 @@
-#! /usr/bin/env python3
+#!/usr/bin/env python3
 
-import sys, os, re
+import os
+import sys
+import re
 
-def main():
-
-    while True:
-        if 'PS1' in os.environ:
-            os.write(1, (os.environ['PS1']).encode())
+def pipes(pipe_input):
+        writeCommands = inputs[0:inputs.index("|")]
+        readCommands = inputs[inputs.index("|") + 1:]
+        pr, pw = os.pipe()
+        rc = os.fork()
+        if rc < 0:
+            os.write(2, ("fork failed, returning %d\n" % rc).encode())
+            sys.exit(1)
+        elif rc == 0:
+            os.close(1)  # close fd 1 (output)
+            os.dup2(pw, 1)  # duplicate pw in fd1
+            for fd in (pr, pw):
+                os.close(fd)  # close pw & pr
+            executing(writeCommands)  # Run the process as normal
+            os.write(2, ("Could not exec %s\n" % writeCommands[0]).encode())
+            sys.exit(1)
         else:
-            os.write(1, ("$ ").encode())
+            os.close(0)  # close fd 0 (input)
+            os.dup2(pr, 0)  # dup pr in fd0
+            for fd in (pw, pr):
+                os.close(fd)
+            if "|" in readCommands:
+                pipe(readCommands)
+            executing(readCommands)  # Run the process as normal
+            os.write(2, ("Could not exec %s\n" % writeCommands[0]).encode())
 
+def executing(args):
+    for dir in re.split(":", os.environ['PATH']): # try each directory in the path
+        program = "%s/%s" % (dir, args[0])
         try:
-            userInput = input()
-        except EOFError:
-            sys.exit(1)
-        except ValueError:
-            sys.exit(1)
+            os.execve(program, args, os.environ) # try to exec program
+        except FileNotFoundError:             # ...expected
+            pass                              # ...fail quietly
 
-        inputHandler(userInput) # handle input method
+    os.write(2, ("Child:    Could not exec %s\n" % args[0]).encode())
+    sys.exit(1)                 # terminate with error
 
-def inputHandler(userInput):
-    args = userInput.split() # tokenize user input arguments
-
-    if 'exit' in userInput.lower(): # exit command - Exit and exit both work
+while True:    
+    
+    end_string = os.getcwd() + "$ "
+    if 'PS1' in os.environ:
+        end_string=os.environ['PS1']
+    try:
+        inputs = [str(n) for n in input(end_string).split()]
+    except EOFError:    #catch error
+        sys.exit(1)
+    
+    if len(inputs) < 1:
+        continue
+    
+    if inputs[0] == "exit":
         sys.exit(0)
 
-    elif userInput == "":   # empty input, just reprompt the user
-        pass
-
-    elif 'cd' in args[0]: # change directory
-        try: 
-            if len(args) <= 1: # if just cd is specified, move down to parent directory of current directory
-                os.chdir("..")
-            else: 
-                os.chdir(args[1])
-            print(os.getcwd())
-        except FileNotFoundError:
-            os.write(1, ("cd %s: No such file or directory" % args[1]).encode())
-            pass
-
-    elif "<" in userInput:
-        redirectIn(args)
-
-    elif ">" in userInput: 
-        redirectOut(args)
-
-    elif '|' in userInput: # pipe: used to read the output from one command and use it for the input of another command (i.e. dir | sort)
-        pipe(args)
-
-    else:
-        executeCommand(args)
-
-def redirectIn(args):
-    pid = os.getpid()
-    rc = os.fork()
-
-    if rc < 0:
-        os.write(2, ("fork failed, returning %d\n" % rc).encode())
-        sys.exit(1)
-
-    elif rc == 0:
-        del args[1]
-        # set file descriptor out
-        fd = sys.stdout.fileno() 
-
+    if inputs[0] == 'cd':
         try:
-            os.execve(args[0], args, os.environ)
+            os.chdir(inputs[1])
         except FileNotFoundError:
             pass
-        
-        for dir in re.split(":", os.environ['PATH']): # try each directory in the path
-                program = "%s/%s" % (dir, args[0])
-                try:
-                    os.execve(program, args, os.environ) # try to exec program
-                except FileNotFoundError:
-                    pass
             
-            os.write(2, ("%s: command not found\n" % args[0]).encode()) # command not found, print error message
-            sys.exit(1)
-        
+    elif '|' in inputs:
+        pipes(inputs)
+
     else:
-        childpid = os.wait()
-
-
-def pipe(args):
-    pid = os.getpid()
-    pipe = args.index("|") # check for pipe symbol in command
-
-    pr, pw = os.pipe() # tuple
-    for f in (pr, pw):
-        os.set_inheritable(f,True)
-    
-    rc = os.fork()
-
-    if rc < 0:
-        os.write(2, ("fork failed, returning %d\n" % rc).encode())
-        sys.exit(1)
-
-    elif rc == 0: # write to pipe from child
-        args = args[:pipe]
-
-        os.close(1)
-
-        fd = os.dup(pw) # dup() duplicates file descriptor 
-        os.set_inheritable(fd, True)
-        for fd in (pr, pw):
-            os.close(fd)
-        if os.path.isfile(args[0]):
-            try:
-                os.execve(args[0], args, os.environ)
-            except FileNotFoundError:
-                pass
+        rc = os.fork()
+        if rc < 0:
+            os.write(2, ("fork failed, returning %d\n" % rc).encode())
+            sys.exit(1)
+        elif rc == 0:   
+            if '>' in inputs:
+                os.close(0)
+                os.open(inputs[inputs.index('>')+1], os.O_RDONLY);
+                os.set_inheritable(0, True)
+                executing(inputs[0:inputs.index('>')])
+            else:
+                os.close(0)
+                os.open(inputs[inputs.index('<')+1], os.O_RDONLY);
+                os.set_inheritable(0, True)
+                executing(inputs[0:inputs.index('<')])
         else:
-            for dir in re.split(":", os.environ['PATH']): # try each directory in the path
-                program = "%s/%s" % (dir, args[0])
-                try:
-                    os.execve(program, args, os.environ) # try to exec program
-                except FileNotFoundError:
-                    pass
-            
-            os.write(2, ("%s: command not found\n" % args[0]).encode()) # command not found, print error message
-            sys.exit(1)
-    
-    else:
-        args = args[pipe+1:]
-        
-        os.close(0)
-
-        fd = os.dup(pr)
-        os.set_inheritable(fd, True)
-        for fd in (pw, pr):
-            os.close(fd)
-        
-        if os.path.isfile(args[0]):
-            try:
-                os.execve(args[0], args, os.environ)
-            except FileNotFoundError:
-                pass
-        else:
-            for dir in re.split(":", os.environ['PATH']): # try each directory in the path
-                program = "%s/%s" % (dir, args[0])
-                try:
-                    os.execve(program, args, os.environ) # try to exec program
-                except FileNotFoundError:
-                    pass
-            
-            os.write(2, ("%s: command not found\n" % args[0]).encode()) # command not found, print error message
-            sys.exit(1)
-
-def executeCommand(args):
-    pid = os.getpid()
-    rc = os.fork()
-
-    # based off of p3-exec demo
-
-    if rc < 0: # capture error during fork
-        os.write(2, ("fork failed, returning %d\n" % rc).encode())
-        sys.exit(1)
-
-    elif rc == 0:
-        for dir in re.split(":", os.environ['PATH']): # try each directory in the path
-            program = "%s/%s" % (dir, args[0])
-            try:
-                os.execve(program, args, os.environ) # try to exec program
-            except FileNotFoundError:
-                pass
-                
-        os.write(2, ("%s: command not found\n" % args[0]).encode()) # command not found, print error message
-        sys.exit(1)
-    
-    else:
-        childpid = os.wait()
-
-if __name__ == "__main__":
-    main()
+            os.wait()
